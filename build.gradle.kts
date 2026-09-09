@@ -24,7 +24,6 @@ android {
         getByName("main") {
             manifest.srcFile("AndroidManifest.xml")
             java.srcDirs(".")
-            java.exclude("build/**", ".gradle/**", ".github/**")
         }
     }
 
