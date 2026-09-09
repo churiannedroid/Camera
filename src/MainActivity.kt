@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -17,8 +18,10 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -32,6 +35,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -97,64 +101,100 @@ fun CameraContent() {
     var flashMode by remember { mutableIntStateOf(ImageCapture.FLASH_MODE_OFF) }
     var aspectRatio by remember { mutableIntStateOf(AspectRatio.RATIO_4_3) }
     var zoomLinear by remember { mutableFloatStateOf(0f) }
-    var isFlashing by remember { mutableStateOf(false) }
+    
+    var isShutterFlashing by remember { mutableStateOf(false) }
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
     var previewViewInstance by remember { mutableStateOf<PreviewView?>(null) }
+    val imageCapture = remember { ImageCapture.Builder().build() }
 
-    val imageCapture = remember(flashMode, aspectRatio) {
-        ImageCapture.Builder()
-            .setFlashMode(flashMode)
+    // Synchronize Camera Lifecycle whenever lens, aspect ratio, or preview changes
+    LaunchedEffect(lensFacing, aspectRatio, previewViewInstance) {
+        val previewView = previewViewInstance ?: return@LaunchedEffect
+        val cameraProvider = ProcessCameraProvider.getInstance(context).get()
+
+        val preview = Preview.Builder()
             .setTargetAspectRatio(aspectRatio)
             .build()
+            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+        imageCapture.targetRotation = previewView.display.rotation
+        imageCapture.flashMode = flashMode
+
+        val cameraSelector = CameraSelector.Builder()
+            .requireLensFacing(lensFacing)
+            .build()
+
+        try {
+            cameraProvider.unbindAll()
+            camera = cameraProvider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                imageCapture
+            )
+            camera?.cameraControl?.setLinearZoom(zoomLinear)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // Apply flash setting dynamically
+    LaunchedEffect(flashMode) {
+        imageCapture.flashMode = flashMode
+        if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+            camera?.cameraControl?.enableTorch(flashMode == ImageCapture.FLASH_MODE_ON)
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
             factory = { ctx ->
-                PreviewView(ctx).also { previewViewInstance = it }
+                PreviewView(ctx).also { 
+                    it.scaleType = PreviewView.ScaleType.FILL_CENTER
+                    previewViewInstance = it 
+                }
             },
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(camera, previewViewInstance) {
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, _, zoomChange, _ ->
+                        val newZoom = (zoomLinear + (zoomChange - 1f)).coerceIn(0f, 1f)
+                        zoomLinear = newZoom
+                        camera?.cameraControl?.setLinearZoom(newZoom)
+                    }
+                }
+                .pointerInput(Unit) {
                     detectTapGestures { offset ->
                         val pv = previewViewInstance ?: return@detectTapGestures
                         val cam = camera ?: return@detectTapGestures
 
+                        focusPoint = offset
                         val factory = pv.meteringPointFactory
                         val point = factory.createPoint(offset.x, offset.y)
-                        val action = FocusMeteringAction.Builder(point).build()
+                        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                            .setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS)
+                            .build()
 
                         cam.cameraControl.startFocusAndMetering(action)
-                    }
-                },
-            update = { previewView ->
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder()
-                        .setTargetAspectRatio(aspectRatio)
-                        .build().also {
-                            it.setSurfaceProvider(previewView.surfaceProvider)
+                        coroutineScope.launch {
+                            delay(2000)
+                            focusPoint = null
                         }
-                    val cameraSelector = CameraSelector.Builder()
-                        .requireLensFacing(lensFacing)
-                        .build()
-
-                    try {
-                        cameraProvider.unbindAll()
-                        camera = cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            cameraSelector,
-                            preview,
-                            imageCapture
-                        )
-                    } catch (e: Exception) {
-                        e.printStackTrace()
                     }
-                }, ContextCompat.getMainExecutor(context))
-            }
+                }
         )
+
+        // Focus ring UI box
+        focusPoint?.let { point ->
+            Box(
+                modifier = Modifier
+                    .offset(point.x.dp - 30.dp, point.y.dp - 30.dp)
+                    .size(60.dp)
+                    .border(2.dp, Color.Yellow, CircleShape)
+            )
+        }
 
         // Top Controls: Flash + Aspect Ratio
         Row(
@@ -208,7 +248,7 @@ fun CameraContent() {
             }
         }
 
-        // Zoom Control Slider
+        // Zoom Slider Control
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -231,7 +271,7 @@ fun CameraContent() {
             )
         }
 
-        // Bottom Controls: Shutter + Lens Switch
+        // Bottom Bar Controls
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -248,9 +288,9 @@ fun CameraContent() {
                 color = Color.White,
                 onClick = {
                     coroutineScope.launch {
-                        isFlashing = true
-                        delay(120)
-                        isFlashing = false
+                        isShutterFlashing = true
+                        delay(100)
+                        isShutterFlashing = false
                     }
                     takePhoto(context, imageCapture)
                 }
@@ -276,9 +316,9 @@ fun CameraContent() {
             }
         }
 
-        // Shutter Screen Flash Overlay
+        // Screen Flash visual indicator
         AnimatedVisibility(
-            visible = isFlashing,
+            visible = isShutterFlashing,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
@@ -312,11 +352,11 @@ private fun takePhoto(context: Context, imageCapture: ImageCapture) {
         ContextCompat.getMainExecutor(context),
         object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                // Photo saved quietly to gallery
+                Toast.makeText(context, "Saved to Gallery!", Toast.LENGTH_SHORT).show()
             }
 
             override fun onError(exception: ImageCaptureException) {
-                exception.printStackTrace()
+                Toast.makeText(context, "Failed: ${exception.message}", Toast.LENGTH_SHORT).show()
             }
         }
     )
