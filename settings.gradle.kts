@@ -14,4 +14,3 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "HyperCam"
-include(":app")
