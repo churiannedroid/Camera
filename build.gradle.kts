@@ -20,6 +20,13 @@ android {
         }
     }
 
+    sourceSets {
+        getByName("main") {
+            manifest.srcFile("AndroidManifest.xml")
+            java.srcDirs(".", "src")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
